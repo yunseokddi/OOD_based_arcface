@@ -2,6 +2,7 @@ import os
 import argparse
 import torch.cuda
 import logging
+import torch.nn as nn
 
 from utils.utils_config import get_config
 from torch import distributed
@@ -69,15 +70,7 @@ def main(args):
     backbone = get_model(
         cfg.network, dropout=0.0, fp16=cfg.fp16, num_features=cfg.embedding_size).cuda()
 
-    backbone = torch.nn.parallel.DistributedDataParallel(
-        module=backbone, broadcast_buffers=False, device_ids=[local_rank], bucket_cap_mb=16,
-        find_unused_parameters=True)
-
-    backbone.register_comm_hook(None, fp16_compress_hook)
-
     backbone.train()
-
-    backbone._set_static_graph()
 
     margin_loss = CombinedMarginLoss(
         64,
@@ -108,24 +101,8 @@ def main(args):
     start_epoch = 0
     global_step = 0
 
-    for key, value in cfg.items():
-        num_space = 25 - len(key)
-        logging.info(": " + key + " " * num_space + str(value))
-
-    callback_verification = CallBackVerification(
-        val_targets=cfg.val_targets, rec_prefix=cfg.rec,
-        summary_writer=summary_writer, wandb_logger=wandb_logger
-    )
-    callback_logging = CallBackLogging(
-        frequent=cfg.frequent,
-        total_step=cfg.total_step,
-        batch_size=cfg.batch_size,
-        start_step=global_step,
-        writer=summary_writer
-    )
-
+    criterion = nn.CrossEntropyLoss().cuda()
     loss_am = AverageMeter()
-    amp = torch.cuda.amp.grad_scaler.GradScaler(growth_interval=100)
 
     for epoch in range(start_epoch, cfg.num_epoch):
         if isinstance(train_loader, DataLoader):
@@ -134,31 +111,18 @@ def main(args):
         for _, (img, local_labels) in enumerate(train_loader):
             global_step += 1
             local_embeddings = backbone(img)
-            loss: torch.Tensor = module_partial_fc(local_embeddings, local_labels)
 
-            if cfg.fp16:
-                amp.scale(loss).backward()
-                if global_step % cfg.gradient_acc == 0:
-                    amp.unscale_(opt)
-                    torch.nn.utils.clip_grad_norm_(backbone.parameters(), 5)
-                    amp.step(opt)
-                    amp.update()
-                    opt.zero_grad()
+            loss = criterion(local_embeddings, local_labels)
 
-            else:
-                loss.backward()
-                if global_step % cfg.gradient_acc == 0:
-                    torch.nn.utils.clip_grad_norm_(backbone.parameters(), 5)
-                    opt.step()
-                    opt.zero_grad()
+            loss.backward()
+            if global_step % cfg.gradient_acc == 0:
+                torch.nn.utils.clip_grad_norm_(backbone.parameters(), 5)
+                opt.step()
+                opt.zero_grad()
             lr_scheduler.step()
 
             with torch.no_grad():
                 loss_am.update(loss.item(), 1)
-                callback_logging(global_step, loss_am, epoch, cfg.fp16, lr_scheduler.get_last_lr()[0], amp)
-
-                if global_step % cfg.verbose == 0 and global_step > 0:
-                    callback_verification(global_step, backbone)
 
         if rank == 0:
             path_module = os.path.join(cfg.output, "model.pt")

@@ -13,14 +13,14 @@ config.resume = False
 config.save_all_states = False
 config.output = "ms1mv3_arcface_r50"
 
-config.embedding_size = 512
+config.embedding_size = 1024
 
 # Partial FC
 config.sample_rate = 1
 config.interclass_filtering_threshold = 0
 
 config.fp16 = False
-config.batch_size = 128
+config.batch_size = 512
 
 # For SGD 
 config.optimizer = "sgd"
